@@ -1,5 +1,5 @@
 # 使用 Go 官方镜像作为基础镜像
-FROM golang:1.24
+FROM golang:1.24 AS builder
 
 # 设置工作目录
 WORKDIR /app
@@ -11,7 +11,9 @@ COPY . .
 RUN go mod tidy
 
 # 编译 Go 程序
-RUN go build -o telegram-deepseek-bot main.go
+RUN CGO_ENABLED=1 go build -ldflags="-w -s" -v -o telegram-deepseek-bot main.go
+
+FROM buildpack-deps:curl
 
 # 设置运行环境变量（可选）
 ENV TELEGRAM_BOT_TOKEN=""
@@ -23,5 +25,7 @@ ENV VOLC_SK=""
 ENV DB_TYPE=""
 ENV DB_CONF=""
 
+WORKDIR /app
+COPY --from=builder /app/telegram-deepseek-bot .
 # 运行程序
 CMD ["./telegram-deepseek-bot"]
