@@ -8,10 +8,8 @@ WORKDIR /app
 COPY . .
 
 # 下载依赖
-RUN go mod tidy
-
-# 编译 Go 程序
-RUN CGO_ENABLED=1 go build -ldflags="-w -s" -v -o telegram-deepseek-bot main.go
+RUN go mod tidy; \
+    go build -ldflags="-w -s" -v -o telegram-deepseek-bot main.go
 
 FROM buildpack-deps:curl
 
