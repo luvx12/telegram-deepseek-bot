@@ -1,3 +1,7 @@
+## group
+telegram-group: https://t.me/+WtaMcDpaMOlhZTE1 , or you can have a try GWSbot.      
+every body have **3000** token to try this bot, please give me a star!
+
 # DeepSeek Telegram Bot
 
 This repository provides a **Telegram bot** built with **Golang** that integrates with **DeepSeek API** to provide
@@ -73,6 +77,9 @@ You can configure the bot via environment variables:
 | ALLOWED_TELEGRAM_GROUP_IDS	    | telegram chat id, only these chat can use bot, using "," splite. empty means all group can use it. 0 means all group is banned | -                         |
 | DEEPSEEK_PROXY	                | deepseek proxy                                                                                                                 | -                         |
 | TELEGRAM_PROXY	                | telegram proxy                                                                                                                 | -                         |
+| LANG	                          | en / zh                                                                                                                        | en                        |
+| TOKEN_PER_USER	                | The tokens that each user can use                                                                                              | 10000                     |
+| ADMIN_USER_IDS	                | admin user, can use some admin commands                                                                                        | -                         |
 
 ### CUSTOM_URL
 
@@ -92,6 +99,10 @@ support sqlite3 or mysql
 if DB_TYPE is sqlite3, give a file path, such as `./data/telegram_bot.db`     
 if DB_TYPE is mysql, give a mysql link, such as
 `root:admin@tcp(127.0.0.1:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local`, database must be created.
+
+### LANG
+
+choose a language for bot, English or Chinese.
 
 ## Command
 
@@ -136,11 +147,19 @@ allows the bot to chat through /chat command in groups, without the bot being se
 <img width="374" alt="aa92b3c9580da6926a48fc1fc5c37c03" src="https://github.com/user-attachments/assets/00a0faf3-6037-4d84-9a33-9aa6c320e44d" />
 
 ### /help
+
 <img width="374" alt="aa92b3c9580da6926a48fc1fc5c37c03" src="https://github.com/user-attachments/assets/869e0207-388b-49ca-b26a-378f71d58818" />
 
 ## Advanced Usage
+
 [Custom Command](https://github.com/yincongcyincong/telegram-deepseek-bot/blob/main/static/doc/advanced.md)      
-Define some HTTP requests combined with DeepSeek to enable DeepSeek to help you perform data analysis, article analysis, and other functions.
+Define some HTTP requests combined with DeepSeek to enable DeepSeek to help you perform data analysis, article analysis,
+and other functions.
+
+## Admin Command
+### /addtoken
+add token for user.  
+<img width="374" alt="aa92b3c9580da6926a48fc1fc5c37c03" src="https://github.com/user-attachments/assets/12d98272-0718-4c9b-bc5c-e0a92e6c8664" />
 
 ## Deployment
 
@@ -158,7 +177,7 @@ Define some HTTP requests combined with DeepSeek to enable DeepSeek to help you 
 
 ## Contributing
 
-Feel free to submit issues and pull requests to improve this bot. 🚀
+Feel free to submit issues and pull requests to improve this bot. 🚀     
 
 ## License
 

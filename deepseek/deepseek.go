@@ -23,7 +23,7 @@ import (
 const (
 	OneMsgLen       = 3896
 	FirstSendLen    = 30
-	NonFirstSendLen = 300
+	NonFirstSendLen = 500
 )
 
 // GetContentFromDP get comment from deepseek
@@ -75,11 +75,14 @@ func callDeepSeekAPI(prompt string, update tgbotapi.Update, messageChan chan *pa
 	request := &deepseek.StreamChatCompletionRequest{
 		Model:  model,
 		Stream: true,
+		StreamOptions: deepseek.StreamOptions{
+			IncludeUsage: true,
+		},
 	}
 	messages := make([]deepseek.ChatCompletionMessage, 0)
 
 	msgRecords := db.GetMsgRecord(userId)
-	if msgRecords != nil {
+	if msgRecords != nil && model != deepseek.DeepSeekReasoner {
 		aqs := msgRecords.AQs
 		if len(aqs) > 10 {
 			aqs = aqs[len(aqs)-10:]

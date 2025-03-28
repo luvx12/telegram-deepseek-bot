@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/yincongcyincong/telegram-deepseek-bot/command"
 	"net/http"
 	"strings"
 	"time"
 
 	godeepseek "github.com/cohesion-org/deepseek-go"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/yincongcyincong/telegram-deepseek-bot/command"
 	"github.com/yincongcyincong/telegram-deepseek-bot/conf"
 	"github.com/yincongcyincong/telegram-deepseek-bot/db"
 	"github.com/yincongcyincong/telegram-deepseek-bot/deepseek"
+	"github.com/yincongcyincong/telegram-deepseek-bot/i18n"
 	"github.com/yincongcyincong/telegram-deepseek-bot/logger"
 	"github.com/yincongcyincong/telegram-deepseek-bot/param"
 	"github.com/yincongcyincong/telegram-deepseek-bot/utils"
@@ -32,10 +33,11 @@ func StartListenRobot() {
 
 		updates := bot.GetUpdatesChan(u)
 		for update := range updates {
+			chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 			if !checkUserAllow(update) && !checkGroupAllow(update) {
-				_, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 				chat := utils.GetChat(update)
-				logger.Warn("user not allow to use this bot", "userID", userId, "chat", chat)
+				logger.Warn("user/group not allow to use this bot", "userID", userId, "chat", chat)
+				i18n.SendMsg(chatId, "valid_user_group", bot, nil, msgId)
 				continue
 			}
 
@@ -62,6 +64,12 @@ func StartListenRobot() {
 
 // requestHuoshanAndResp request huoshan api
 func requestHuoshanAndResp(update tgbotapi.Update, bot *tgbotapi.BotAPI, content string) {
+	_, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	if checkUserTokenExceed(update, bot) {
+		logger.Warn("user token exceed", "userID", userId)
+		return
+	}
+
 	messageChan := make(chan *param.MsgInfo)
 
 	// request DeepSeek API
@@ -73,6 +81,12 @@ func requestHuoshanAndResp(update tgbotapi.Update, bot *tgbotapi.BotAPI, content
 
 // requestDeepseekAndResp request deepseek api
 func requestDeepseekAndResp(update tgbotapi.Update, bot *tgbotapi.BotAPI, content string) {
+	_, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	if checkUserTokenExceed(update, bot) {
+		logger.Warn("user token exceed", "userID", userId)
+		return
+	}
+
 	messageChan := make(chan *param.MsgInfo)
 
 	// request DeepSeek API
@@ -89,7 +103,7 @@ func handleUpdate(messageChan chan *param.MsgInfo, update tgbotapi.Update, bot *
 	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 	parseMode := tgbotapi.ModeMarkdown
 
-	tgMsgInfo := tgbotapi.NewMessage(chatId, "🤔 thinking...")
+	tgMsgInfo := tgbotapi.NewMessage(chatId, i18n.GetMessage(*conf.Lang, "thinking", nil))
 	tgMsgInfo.ReplyToMessageID = msgId
 	firstSendInfo, err := bot.Send(tgMsgInfo)
 	if err != nil {
@@ -220,7 +234,7 @@ func handleCommand(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	case "chat":
 		sendChatMessage(update, bot)
 	case "mode":
-		sendModeConfigurationOptions(bot, update.Message.Chat.ID)
+		sendModeConfigurationOptions(update, bot)
 	case "balance":
 		showBalanceInfo(update, bot)
 	case "state":
@@ -230,18 +244,25 @@ func handleCommand(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	case "retry":
 		retryLastQuestion(update, bot)
 	case "photo":
-		sendImg(update)
+		sendImg(update, bot)
 	case "video":
-		sendVideo(update)
+		sendVideo(update, bot)
 	case "help":
-		sendHelpConfigurationOptions(bot, update.Message.Chat.ID)
+		sendHelpConfigurationOptions(update, bot)
 	default:
 		command.ExecuteCustomCommand(cmd)
+	}
+
+	if checkAdminUser(update) {
+		switch cmd {
+		case "addtoken":
+			addToken(update, bot)
+		}
 	}
 }
 
 func sendChatMessage(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatId, _, _ := utils.GetChatIdAndMsgIdAndUserID(update)
+	chatId, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
 	messageText := update.Message.Text
 
 	// Remove /chat and /chat@botUserName from the message
@@ -254,11 +275,7 @@ func sendChatMessage(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 
 	if len(content) == 0 {
 		// If there is no chat content after command
-		msg := tgbotapi.NewMessage(chatId, "❌ Please input text after /chat command.")
-		_, err := bot.Send(msg)
-		if err != nil {
-			logger.Warn("send help message fail", "err", err)
-		}
+		i18n.SendMsg(chatId, "chat_fail", bot, nil, msgId)
 		return
 	}
 
@@ -270,7 +287,7 @@ func sendChatMessage(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	}
 }
 func retryLastQuestion(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatId, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 
 	records := db.GetMsgRecord(userId)
 	if records != nil && len(records.AQs) > 0 {
@@ -280,74 +297,60 @@ func retryLastQuestion(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 			requestHuoshanAndResp(update, bot, records.AQs[len(records.AQs)-1].Question)
 		}
 	} else {
-		msg := tgbotapi.NewMessage(chatId, "🚀no last question!")
-		msg.ParseMode = tgbotapi.ModeMarkdown
-		_, err := bot.Send(msg)
-		if err != nil {
-			logger.Warn("send retry message fail", "err", err)
-		}
+		i18n.SendMsg(chatId, "last_question_fail", bot, nil, msgId)
 	}
 }
 
 // clearAllRecord clear all record
 func clearAllRecord(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatId, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 	db.DeleteMsgRecord(userId)
-	msg := tgbotapi.NewMessage(chatId, "🚀successfully delete!")
-	msg.ParseMode = tgbotapi.ModeMarkdown
-	_, err := bot.Send(msg)
-	if err != nil {
-		logger.Warn("send clear message fail", "err", err)
-	}
+	i18n.SendMsg(chatId, "delete_succ", bot, nil, msgId)
+}
+
+// addToken clear all record
+func addToken(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	chatId, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
+	msg := utils.GetMessage(update)
+	command := "/addtoken"
+	mention := "@" + bot.Self.UserName
+
+	content := strings.ReplaceAll(msg.Text, command, mention)
+	content = strings.ReplaceAll(content, mention, "")
+	content = strings.TrimSpace(content)
+	splitContent := strings.Split(content, " ")
+
+	db.AddAvailToken(int64(utils.ParseInt(splitContent[0])), utils.ParseInt(splitContent[1]))
+	i18n.SendMsg(chatId, "add_token_succ", bot, nil, msgId)
 }
 
 // showBalanceInfo show balance info
 func showBalanceInfo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatId, _, _ := utils.GetChatIdAndMsgIdAndUserID(update)
+	chatId, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
 
 	if *conf.DeepseekType != param.DeepSeek {
-		msg := tgbotapi.NewMessage(chatId, "🚀now model is not deepseek")
-		msg.ParseMode = tgbotapi.ModeMarkdown
-		_, err := bot.Send(msg)
-		if err != nil {
-			logger.Warn("send message fail", "err", err)
-		}
+		i18n.SendMsg(chatId, "not_deepseek", bot, nil, msgId)
 		return
 	}
 
 	balance := deepseek.GetBalanceInfo()
 
 	// handle balance info msg
-	msgContent := fmt.Sprintf(`🟣 Available: %t
+	msgContent := fmt.Sprintf(i18n.GetMessage(*conf.Lang, "balance_title", nil), balance.IsAvailable)
 
-`, balance.IsAvailable)
+	template := i18n.GetMessage(*conf.Lang, "balance_content", nil)
 
-	template := `🟣 Your Currency: %s
-
-🟣 Your TotalBalance Left: %s
-
-🟣 Your ToppedUpBalance Left: %s
-
-🟣 Your GrantedBalance Left: %s
-
-`
 	for _, bInfo := range balance.BalanceInfos {
 		msgContent += fmt.Sprintf(template, bInfo.Currency, bInfo.TotalBalance,
 			bInfo.ToppedUpBalance, bInfo.GrantedBalance)
 	}
 
-	msg := tgbotapi.NewMessage(chatId, msgContent)
-	msg.ParseMode = tgbotapi.ModeMarkdown
-	_, err := bot.Send(msg)
-	if err != nil {
-		logger.Warn("send balance message fail", "err", err)
-	}
-
+	utils.SendMsg(chatId, msgContent, bot, msgId)
 }
 
 // showStateInfo show user's usage of token
 func showStateInfo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatId, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 	userInfo, err := db.GetUserByID(userId)
 	if err != nil {
 		logger.Warn("get user info fail", "err", err)
@@ -377,27 +380,15 @@ func showStateInfo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 		logger.Warn("get week token fail", "err", err)
 	}
 
-	template := `🟣 Your Total Token Usage: %d
-
-🟣 Your Today Token Usage: %d
-
-🟣 Your This Week Token Usage: %d
-
-🟣 Your This Month Token Usage: %d
-
-`
+	template := i18n.GetMessage(*conf.Lang, "state_content", nil)
 	msgContent := fmt.Sprintf(template, userInfo.Token, todayTokey, weekToken, monthToken)
-	msg := tgbotapi.NewMessage(chatId, msgContent)
-	msg.ParseMode = tgbotapi.ModeMarkdown
-	_, err = bot.Send(msg)
-	if err != nil {
-		logger.Warn("send state message fail", "err", err)
-	}
-
+	utils.SendMsg(chatId, msgContent, bot, msgId)
 }
 
 // sendModeConfigurationOptions send config view
-func sendModeConfigurationOptions(bot *tgbotapi.BotAPI, chatID int64) {
+func sendModeConfigurationOptions(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	chatID, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
+
 	// create inline button
 	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -411,16 +402,12 @@ func sendModeConfigurationOptions(bot *tgbotapi.BotAPI, chatID int64) {
 		),
 	)
 
-	msg := tgbotapi.NewMessage(chatID, "🚀**Select chat mode**")
-	msg.ReplyMarkup = inlineKeyboard
-	msg.ParseMode = tgbotapi.ModeMarkdown
-	_, err := bot.Send(msg)
-	if err != nil {
-		logger.Warn("send inline message fail", "err", err)
-	}
+	i18n.SendMsg(chatID, "chat_mode", bot, &inlineKeyboard, msgId)
 }
 
-func sendHelpConfigurationOptions(bot *tgbotapi.BotAPI, chatID int64) {
+func sendHelpConfigurationOptions(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	chatID, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
+
 	// create inline button
 	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -437,13 +424,7 @@ func sendHelpConfigurationOptions(bot *tgbotapi.BotAPI, chatID int64) {
 		),
 	)
 
-	msg := tgbotapi.NewMessage(chatID, "🤖**Select command**")
-	msg.ReplyMarkup = inlineKeyboard
-	msg.ParseMode = tgbotapi.ModeMarkdown
-	_, err := bot.Send(msg)
-	if err != nil {
-		logger.Warn("send inline message fail", "err", err)
-	}
+	i18n.SendMsg(chatID, "command_notice", bot, &inlineKeyboard, msgId)
 }
 
 // handleCallbackQuery handle callback response
@@ -453,7 +434,7 @@ func handleCallbackQuery(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	case godeepseek.DeepSeekChat, godeepseek.DeepSeekCoder, godeepseek.DeepSeekReasoner:
 		handleModeUpdate(update, bot)
 	case "mode":
-		sendModeConfigurationOptions(bot, update.CallbackQuery.Message.Chat.ID)
+		sendModeConfigurationOptions(update, bot)
 	case "balance":
 		showBalanceInfo(update, bot)
 	case "clear":
@@ -495,25 +476,26 @@ func handleModeUpdate(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 		logger.Warn("request callback fail", "err", err)
 	}
 
-	msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "You choose: "+update.CallbackQuery.Data)
-	if _, err := bot.Send(msg); err != nil {
-		logger.Warn("request send msg fail", "err", err)
-	}
+	//utils.SendMsg(update.CallbackQuery.Message.Chat.ID,
+	//	i18n.GetMessage(*conf.Lang, "mode_choose", nil)+update.CallbackQuery.Data, bot, update.CallbackQuery.Message.MessageID)
 }
 
 func sendFailMessage(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "set mode fail!")
+	callback := tgbotapi.NewCallback(update.CallbackQuery.ID, i18n.GetMessage(*conf.Lang, "set_mode", nil))
 	if _, err := bot.Request(callback); err != nil {
 		logger.Warn("request callback fail", "err", err)
 	}
 
-	msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "set mode fail!")
-	if _, err := bot.Send(msg); err != nil {
-		logger.Warn("request send msg fail", "err", err)
-	}
+	i18n.SendMsg(update.CallbackQuery.Message.Chat.ID, "set_mode", bot, nil, update.CallbackQuery.Message.MessageID)
 }
 
-func sendVideo(update tgbotapi.Update) {
+func sendVideo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	chatId, replyToMessageID, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	if checkUserTokenExceed(update, bot) {
+		logger.Warn("user token exceed", "userID", userId)
+		return
+	}
+
 	prompt := strings.Replace(update.Message.Text, "/video", "", 1)
 	videoUrl, err := deepseek.GenerateVideo(prompt)
 	if err != nil {
@@ -528,7 +510,6 @@ func sendVideo(update tgbotapi.Update) {
 
 	// create image url
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendVideo", *conf.BotToken)
-	chatId, replyToMessageID, _ := utils.GetChatIdAndMsgIdAndUserID(update)
 
 	// construct request param
 	req := map[string]interface{}{
@@ -565,11 +546,28 @@ func sendVideo(update tgbotapi.Update) {
 		return
 	}
 
+	db.InsertRecordInfo(&db.Record{
+		UserId:    userId,
+		Question:  prompt,
+		Answer:    videoUrl,
+		Token:     param.VideoTokenUsage,
+		IsDeleted: 1,
+	})
 	return
 }
 
-func sendImg(update tgbotapi.Update) {
-	prompt := strings.Replace(update.Message.Text, "/photo", "", 1)
+func sendImg(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	chatId, replyToMessageID, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	if checkUserTokenExceed(update, bot) {
+		logger.Warn("user token exceed", "userID", userId)
+		return
+	}
+
+	prompt := strings.TrimSpace(strings.Replace(update.Message.Text, "/photo", "", 1))
+	if len(prompt) == 0 {
+		return
+	}
+
 	data, err := deepseek.GenerateImg(prompt)
 	if err != nil {
 		logger.Warn("generate image fail", "err", err)
@@ -584,7 +582,6 @@ func sendImg(update tgbotapi.Update) {
 	// create image url
 	photoURL := data.Data.ImageUrls[0]
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", *conf.BotToken)
-	chatId, replyToMessageID, _ := utils.GetChatIdAndMsgIdAndUserID(update)
 
 	// construct request param
 	req := map[string]interface{}{
@@ -621,6 +618,14 @@ func sendImg(update tgbotapi.Update) {
 		return
 	}
 
+	db.InsertRecordInfo(&db.Record{
+		UserId:    userId,
+		Question:  prompt,
+		Answer:    data.Data.ImageUrls[0],
+		Token:     param.ImageTokenUsage,
+		IsDeleted: 1,
+	})
+
 	return
 }
 
@@ -656,4 +661,41 @@ func checkGroupAllow(update tgbotapi.Update) bool {
 	}
 
 	return false
+}
+
+func checkUserTokenExceed(update tgbotapi.Update, bot *tgbotapi.BotAPI) bool {
+	if *conf.TokenPerUser == 0 {
+		return false
+	}
+
+	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	userInfo, err := db.GetUserByID(userId)
+	if err != nil {
+		logger.Warn("get user info fail", "err", err)
+		return false
+	}
+
+	if userInfo == nil {
+		logger.Warn("get user info is nil")
+		return false
+	}
+
+	if userInfo.Token >= userInfo.AvailToken {
+		tpl := i18n.GetMessage(*conf.Lang, "token_exceed", nil)
+		content := fmt.Sprintf(tpl, userInfo.Token, userInfo.AvailToken-userInfo.Token, userInfo.AvailToken)
+		utils.SendMsg(chatId, content, bot, msgId)
+		return true
+	}
+
+	return false
+}
+
+func checkAdminUser(update tgbotapi.Update) bool {
+	if len(conf.AdminUserIds) == 0 {
+		return false
+	}
+
+	_, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	_, ok := conf.AdminUserIds[userId]
+	return ok
 }

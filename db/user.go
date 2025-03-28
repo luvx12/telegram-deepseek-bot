@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"github.com/yincongcyincong/telegram-deepseek-bot/conf"
 	"github.com/yincongcyincong/telegram-deepseek-bot/metrics"
 	"time"
 )
@@ -12,13 +13,14 @@ type User struct {
 	Mode       string `json:"mode"`
 	Token      int    `json:"token"`
 	Updatetime int64  `json:"updatetime"`
+	AvailToken int    `json:"avail_token"`
 }
 
 // InsertUser insert user data
 func InsertUser(userId int64, mode string) (int64, error) {
 	// insert data
-	insertSQL := `INSERT INTO users (user_id, mode, updatetime) VALUES (?, ?, ?)`
-	result, err := DB.Exec(insertSQL, userId, mode, time.Now().Unix())
+	insertSQL := `INSERT INTO users (user_id, mode, updatetime, avail_token) VALUES (?, ?, ?, ?)`
+	result, err := DB.Exec(insertSQL, userId, mode, time.Now().Unix(), *conf.TokenPerUser)
 	if err != nil {
 		return 0, err
 	}
@@ -35,12 +37,12 @@ func InsertUser(userId int64, mode string) (int64, error) {
 // GetUserByID get user by userId
 func GetUserByID(userId int64) (*User, error) {
 	// select one use base on name
-	querySQL := `SELECT id, user_id, mode, token FROM users WHERE user_id = ?`
+	querySQL := `SELECT id, user_id, mode, token, avail_token FROM users WHERE user_id = ?`
 	row := DB.QueryRow(querySQL, userId)
 
 	// scan row get result
 	var user User
-	err := row.Scan(&user.ID, &user.UserId, &user.Mode, &user.Token)
+	err := row.Scan(&user.ID, &user.UserId, &user.Mode, &user.Token, &user.AvailToken)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// 如果没有找到数据，返回 nil
@@ -91,6 +93,19 @@ func UpdateUserUpdateTime(userId int64, updateTime int64) error {
 
 // UpdateUserToken update user token
 func UpdateUserToken(userId int64, token int) error {
+	updateSQL := `UPDATE users SET token = token + ? WHERE user_id = ?`
+	_, err := DB.Exec(updateSQL, token, userId)
+	return err
+}
+
+// AddToken add token
+func AddAvailToken(userId int64, token int) error {
+	updateSQL := `UPDATE users SET avail_token = avail_token + ? WHERE user_id = ?`
+	_, err := DB.Exec(updateSQL, token, userId)
+	return err
+}
+
+func AddToken(userId int64, token int) error {
 	updateSQL := `UPDATE users SET token = token + ? WHERE user_id = ?`
 	_, err := DB.Exec(updateSQL, token, userId)
 	return err
