@@ -104,6 +104,10 @@ if DB_TYPE is mysql, give a mysql link, such as
 
 choose a language for bot, English or Chinese.
 
+### other config
+[photo_conf](https://github.com/yincongcyincong/telegram-deepseek-bot/blob/main/static/doc/photoconf.md)     
+[video_conf](https://github.com/yincongcyincong/telegram-deepseek-bot/blob/main/static/doc/videoconf.md)
+
 ## Command
 
 ### /clear
@@ -150,12 +154,6 @@ allows the bot to chat through /chat command in groups, without the bot being se
 
 <img width="374" alt="aa92b3c9580da6926a48fc1fc5c37c03" src="https://github.com/user-attachments/assets/869e0207-388b-49ca-b26a-378f71d58818" />
 
-## Advanced Usage
-
-[Custom Command](https://github.com/yincongcyincong/telegram-deepseek-bot/blob/main/static/doc/advanced.md)      
-Define some HTTP requests combined with DeepSeek to enable DeepSeek to help you perform data analysis, article analysis,
-and other functions.
-
 ## Admin Command
 ### /addtoken
 add token for user.  
@@ -182,3 +180,7 @@ Feel free to submit issues and pull requests to improve this bot. 🚀
 ## License
 
 MIT License © 2025 jack yin
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=yincongcyincong/telegram-deepseek-bot&type=Date)](https://www.star-history.com/#yincongcyincong/telegram-deepseek-bot&Date)
