@@ -1,13 +1,10 @@
 package robot
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
+	"runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	godeepseek "github.com/cohesion-org/deepseek-go"
@@ -19,10 +16,6 @@ import (
 	"github.com/yincongcyincong/telegram-deepseek-bot/logger"
 	"github.com/yincongcyincong/telegram-deepseek-bot/param"
 	"github.com/yincongcyincong/telegram-deepseek-bot/utils"
-)
-
-var (
-	userChatMap = sync.Map{}
 )
 
 // StartListenRobot start listen robot callback
@@ -45,11 +38,6 @@ func StartListenRobot() {
 func ExecUpdate(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 
-	// check user chat exceed max count
-	if checkUserChatExceed(update, bot) {
-		return
-	}
-
 	if !checkUserAllow(update) && !checkGroupAllow(update) {
 		chat := utils.GetChat(update)
 		logger.Warn("user/group not allow to use this bot", "userID", userId, "chat", chat)
@@ -64,34 +52,13 @@ func ExecUpdate(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	if update.Message != nil {
 
 		if skipThisMsg(update, bot) {
+			logger.Warn("skip this msg", "msgId", msgId, "chat", chatId)
 			return
 		}
 
-		if *conf.DeepseekType == param.DeepSeek {
-			requestDeepseekAndResp(update, bot, update.Message.Text)
-		} else {
-			requestHuoshanAndResp(update, bot, update.Message.Text)
-		}
-
+		requestDeepseekAndResp(update, bot, update.Message.Text)
 	}
 
-}
-
-// requestHuoshanAndResp request huoshan api
-func requestHuoshanAndResp(update tgbotapi.Update, bot *tgbotapi.BotAPI, content string) {
-	_, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
-	if checkUserTokenExceed(update, bot) {
-		logger.Warn("user token exceed", "userID", userId)
-		return
-	}
-
-	messageChan := make(chan *param.MsgInfo)
-
-	// request DeepSeek API
-	go deepseek.GetContentFromHS(messageChan, update, bot, content)
-
-	// send response message
-	go handleUpdate(messageChan, update, bot, content)
 }
 
 // requestDeepseekAndResp request deepseek api
@@ -104,8 +71,27 @@ func requestDeepseekAndResp(update tgbotapi.Update, bot *tgbotapi.BotAPI, conten
 
 	messageChan := make(chan *param.MsgInfo)
 
+	var dpReq deepseek.Deepseek
+	if *conf.DeepseekType == param.DeepSeek {
+		dpReq = &deepseek.DeepseekReq{
+			Content:     content,
+			Update:      update,
+			Bot:         bot,
+			MessageChan: messageChan,
+			ToolCall:    godeepseek.ToolCall{},
+		}
+	} else {
+		dpReq = &deepseek.HuoshanReq{
+			Content:     content,
+			Update:      update,
+			Bot:         bot,
+			MessageChan: messageChan,
+			ToolsData:   godeepseek.ToolCall{},
+		}
+	}
+
 	// request DeepSeek API
-	go deepseek.GetContentFromDP(messageChan, update, bot, content)
+	go dpReq.GetContent()
 
 	// send response message
 	go handleUpdate(messageChan, update, bot, content)
@@ -114,7 +100,9 @@ func requestDeepseekAndResp(update tgbotapi.Update, bot *tgbotapi.BotAPI, conten
 // handleUpdate handle robot msg sending
 func handleUpdate(messageChan chan *param.MsgInfo, update tgbotapi.Update, bot *tgbotapi.BotAPI, content string) {
 	defer func() {
-		DecreaseUserChat(update)
+		if err := recover(); err != nil {
+			logger.Error("handleUpdate panic err", "err", err, "stack", string(debug.Stack()))
+		}
 	}()
 
 	var msg *param.MsgInfo
@@ -221,31 +209,53 @@ func sleepUtilNoLimit(msgId int, err error) bool {
 func handleCommandAndCallback(update tgbotapi.Update, bot *tgbotapi.BotAPI) bool {
 	// if it's command, directly
 	if update.Message != nil && update.Message.IsCommand() {
-		handleCommand(update, bot)
+		go handleCommand(update, bot)
 		return true
 	}
 
 	if update.CallbackQuery != nil {
-		handleCallbackQuery(update, bot)
+		go handleCallbackQuery(update, bot)
 		return true
 	}
+
+	if update.Message != nil && update.Message.ReplyToMessage != nil && update.Message.ReplyToMessage.From != nil &&
+		update.Message.ReplyToMessage.From.UserName == bot.Self.UserName {
+		go ExecuteForceReply(update, bot)
+		return true
+	}
+
 	return false
 }
 
 func skipThisMsg(update tgbotapi.Update, bot *tgbotapi.BotAPI) bool {
-
 	if update.Message.Chat.Type == "private" {
-		return false
-	}
+		if strings.TrimSpace(update.Message.Text) == "" &&
+			update.Message.Voice == nil {
+			return true
+		}
 
-	if update.Message.Text == "" || !strings.Contains(update.Message.Text, "@"+bot.Self.UserName) {
-		return true
+		return false
+	} else {
+		if strings.TrimSpace(strings.ReplaceAll(update.Message.Text, "@"+bot.Self.UserName, "")) == "" &&
+			update.Message.Voice == nil {
+			return true
+		}
+
+		if !strings.Contains(update.Message.Text, "@"+bot.Self.UserName) {
+			return true
+		}
 	}
 
 	return false
 }
 
 func handleCommand(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Error("handleCommand panic err", "err", err, "stack", string(debug.Stack()))
+		}
+	}()
+
 	cmd := update.Message.Command()
 	_, _, userID := utils.GetChatIdAndMsgIdAndUserID(update)
 	logger.Info("command info", "userID", userID, "cmd", cmd)
@@ -288,40 +298,44 @@ func handleCommand(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 }
 
 func sendChatMessage(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatId, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
-	messageText := update.Message.Text
+	chatId, msgID, _ := utils.GetChatIdAndMsgIdAndUserID(update)
+
+	messageText := ""
+	if update.Message != nil {
+		messageText = update.Message.Text
+		if messageText == "" && update.Message.Voice != nil && *conf.AudioAppID != "" {
+			audioContent := utils.GetAudioContent(update, bot)
+			if audioContent == nil {
+				logger.Warn("audio url empty")
+				return
+			}
+			messageText = deepseek.FileRecognize(audioContent)
+		}
+	} else {
+		update.Message = new(tgbotapi.Message)
+	}
 
 	// Remove /chat and /chat@botUserName from the message
-	command := "/chat"
-	mention := "@" + bot.Self.UserName
-
-	content := strings.ReplaceAll(messageText, command, mention)
-	content = strings.ReplaceAll(content, mention, "")
-	content = strings.TrimSpace(content)
+	content := utils.ReplaceCommand(messageText, "/chat", bot.Self.UserName)
+	update.Message.Text = content
 
 	if len(content) == 0 {
-		// If there is no chat content after command
-		i18n.SendMsg(chatId, "chat_fail", bot, nil, msgId)
+		err := utils.ForceReply(chatId, msgID, "chat_empty_content", bot)
+		if err != nil {
+			logger.Warn("force reply fail", "err", err)
+		}
 		return
 	}
 
 	// Reply to the chat content
-	if *conf.DeepseekType == param.DeepSeek {
-		requestDeepseekAndResp(update, bot, content)
-	} else {
-		requestHuoshanAndResp(update, bot, content)
-	}
+	requestDeepseekAndResp(update, bot, content)
 }
 func retryLastQuestion(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 
 	records := db.GetMsgRecord(userId)
 	if records != nil && len(records.AQs) > 0 {
-		if *conf.DeepseekType == param.DeepSeek {
-			requestDeepseekAndResp(update, bot, records.AQs[len(records.AQs)-1].Question)
-		} else {
-			requestHuoshanAndResp(update, bot, records.AQs[len(records.AQs)-1].Question)
-		}
+		requestDeepseekAndResp(update, bot, records.AQs[len(records.AQs)-1].Question)
 	} else {
 		i18n.SendMsg(chatId, "last_question_fail", bot, nil, msgId)
 	}
@@ -338,12 +352,8 @@ func clearAllRecord(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 func addToken(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	chatId, msgId, _ := utils.GetChatIdAndMsgIdAndUserID(update)
 	msg := utils.GetMessage(update)
-	command := "/addtoken"
-	mention := "@" + bot.Self.UserName
 
-	content := strings.ReplaceAll(msg.Text, command, mention)
-	content = strings.ReplaceAll(content, mention, "")
-	content = strings.TrimSpace(content)
+	content := utils.ReplaceCommand(msg.Text, "/addtoken", bot.Self.UserName)
 	splitContent := strings.Split(content, " ")
 
 	db.AddAvailToken(int64(utils.ParseInt(splitContent[0])), utils.ParseInt(splitContent[1]))
@@ -381,6 +391,11 @@ func showStateInfo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 	if err != nil {
 		logger.Warn("get user info fail", "err", err)
 		return
+	}
+
+	if userInfo == nil {
+		db.InsertUser(userId, godeepseek.DeepSeekChat)
+		userInfo, err = db.GetUserByID(userId)
 	}
 
 	// get today token
@@ -438,15 +453,19 @@ func sendHelpConfigurationOptions(update tgbotapi.Update, bot *tgbotapi.BotAPI) 
 	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("mode", "mode"),
+			tgbotapi.NewInlineKeyboardButtonData("clear", "clear"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("balance", "balance"),
+			tgbotapi.NewInlineKeyboardButtonData("state", "state"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("retry", "retry"),
+			tgbotapi.NewInlineKeyboardButtonData("chat", "chat"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("clear", "clear"),
+			tgbotapi.NewInlineKeyboardButtonData("photo", "photo"),
+			tgbotapi.NewInlineKeyboardButtonData("video", "video"),
 		),
 	)
 
@@ -455,6 +474,11 @@ func sendHelpConfigurationOptions(update tgbotapi.Update, bot *tgbotapi.BotAPI) 
 
 // handleCallbackQuery handle callback response
 func handleCallbackQuery(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Error("handleCommand panic err", "err", err, "stack", string(debug.Stack()))
+		}
+	}()
 
 	switch update.CallbackQuery.Data {
 	case godeepseek.DeepSeekChat, godeepseek.DeepSeekCoder, godeepseek.DeepSeekReasoner:
@@ -467,6 +491,23 @@ func handleCallbackQuery(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 		clearAllRecord(update, bot)
 	case "retry":
 		retryLastQuestion(update, bot)
+	case "state":
+		showStateInfo(update, bot)
+	case "photo":
+		if update.CallbackQuery.Message.ReplyToMessage != nil {
+			update.CallbackQuery.Message.MessageID = update.CallbackQuery.Message.ReplyToMessage.MessageID
+		}
+		sendImg(update, bot)
+	case "video":
+		if update.CallbackQuery.Message.ReplyToMessage != nil {
+			update.CallbackQuery.Message.MessageID = update.CallbackQuery.Message.ReplyToMessage.MessageID
+		}
+		sendVideo(update, bot)
+	case "chat":
+		if update.CallbackQuery.Message.ReplyToMessage != nil {
+			update.CallbackQuery.Message.MessageID = update.CallbackQuery.Message.ReplyToMessage.MessageID
+		}
+		sendChatMessage(update, bot)
 	}
 
 }
@@ -516,13 +557,35 @@ func sendFailMessage(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 }
 
 func sendVideo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	if utils.CheckUserChatExceed(update, bot) {
+		return
+	}
+
+	defer func() {
+		utils.DecreaseUserChat(update)
+	}()
+
 	chatId, replyToMessageID, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 	if checkUserTokenExceed(update, bot) {
 		logger.Warn("user token exceed", "userID", userId)
 		return
 	}
 
-	prompt := strings.Replace(update.Message.Text, "/video", "", 1)
+	prompt := ""
+	if update.Message != nil {
+		prompt = update.Message.Text
+	}
+
+	prompt = utils.ReplaceCommand(prompt, "/video", bot.Self.UserName)
+	if len(prompt) == 0 {
+		err := utils.ForceReply(chatId, replyToMessageID, "video_empty_content", bot)
+		if err != nil {
+			logger.Warn("force reply fail", "err", err)
+		}
+		return
+	}
+
+	thinkingMsgId := i18n.SendMsg(chatId, "thinking", bot, nil, replyToMessageID)
 	videoUrl, err := deepseek.GenerateVideo(prompt)
 	if err != nil {
 		logger.Warn("generate video fail", "err", err)
@@ -534,41 +597,18 @@ func sendVideo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 		return
 	}
 
-	// create image url
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendVideo", *conf.BotToken)
-
-	// construct request param
-	req := map[string]interface{}{
-		"chat_id": chatId,
-		"video":   videoUrl,
-	}
-	if replyToMessageID != 0 {
-		req["reply_to_message_id"] = replyToMessageID
+	video := tgbotapi.NewInputMediaVideo(tgbotapi.FileURL(videoUrl))
+	edit := tgbotapi.EditMessageMediaConfig{
+		BaseEdit: tgbotapi.BaseEdit{
+			ChatID:    chatId,
+			MessageID: thinkingMsgId,
+		},
+		Media: video,
 	}
 
-	jsonData, err := json.Marshal(req)
+	_, err = bot.Request(edit)
 	if err != nil {
-		logger.Warn("marshal json content fail", "err", err)
-		return
-	}
-
-	// send post request
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		logger.Warn("send request fail", "err", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// analysis response
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		logger.Warn("analysis response fail", "err", err)
-		return
-	}
-
-	if ok, found := result["ok"].(bool); !found || !ok {
-		logger.Warn("send video fail", "result", result)
+		logger.Warn("send video fail", "result", edit)
 		return
 	}
 
@@ -583,17 +623,35 @@ func sendVideo(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 }
 
 func sendImg(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	if utils.CheckUserChatExceed(update, bot) {
+		return
+	}
+
+	defer func() {
+		utils.DecreaseUserChat(update)
+	}()
+
 	chatId, replyToMessageID, userId := utils.GetChatIdAndMsgIdAndUserID(update)
 	if checkUserTokenExceed(update, bot) {
 		logger.Warn("user token exceed", "userID", userId)
 		return
 	}
 
-	prompt := strings.TrimSpace(strings.Replace(update.Message.Text, "/photo", "", 1))
+	prompt := ""
+	if update.Message != nil {
+		prompt = update.Message.Text
+	}
+
+	prompt = utils.ReplaceCommand(prompt, "/photo", bot.Self.UserName)
 	if len(prompt) == 0 {
+		err := utils.ForceReply(chatId, replyToMessageID, "photo_empty_content", bot)
+		if err != nil {
+			logger.Warn("force reply fail", "err", err)
+		}
 		return
 	}
 
+	thinkingMsgId := i18n.SendMsg(chatId, "thinking", bot, nil, replyToMessageID)
 	data, err := deepseek.GenerateImg(prompt)
 	if err != nil {
 		logger.Warn("generate image fail", "err", err)
@@ -605,42 +663,18 @@ func sendImg(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
 		return
 	}
 
-	// create image url
-	photoURL := data.Data.ImageUrls[0]
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", *conf.BotToken)
-
-	// construct request param
-	req := map[string]interface{}{
-		"chat_id": chatId,
-		"photo":   photoURL,
-	}
-	if replyToMessageID != 0 {
-		req["reply_to_message_id"] = replyToMessageID
+	photo := tgbotapi.NewInputMediaPhoto(tgbotapi.FileURL(data.Data.ImageUrls[0]))
+	edit := tgbotapi.EditMessageMediaConfig{
+		BaseEdit: tgbotapi.BaseEdit{
+			ChatID:    chatId,
+			MessageID: thinkingMsgId,
+		},
+		Media: photo,
 	}
 
-	jsonData, err := json.Marshal(req)
+	_, err = bot.Request(edit)
 	if err != nil {
-		logger.Warn("marshal json content fail", "err", err)
-		return
-	}
-
-	// send post request
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		logger.Warn("send request fail", "err", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// analysis response
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		logger.Warn("analysis response fail", "err", err)
-		return
-	}
-
-	if ok, found := result["ok"].(bool); !found || !ok {
-		logger.Warn("send image fail", "result", result)
+		logger.Warn("send image fail", "result", edit)
 		return
 	}
 
@@ -702,6 +736,7 @@ func checkUserTokenExceed(update tgbotapi.Update, bot *tgbotapi.BotAPI) bool {
 	}
 
 	if userInfo == nil {
+		db.InsertUser(userId, godeepseek.DeepSeekChat)
 		logger.Warn("get user info is nil")
 		return false
 	}
@@ -726,26 +761,19 @@ func checkAdminUser(update tgbotapi.Update) bool {
 	return ok
 }
 
-func checkUserChatExceed(update tgbotapi.Update, bot *tgbotapi.BotAPI) bool {
-	chatId, msgId, userId := utils.GetChatIdAndMsgIdAndUserID(update)
-	times := 1
-	if timeInter, ok := userChatMap.Load(userId); ok {
-		times = timeInter.(int)
-		if times >= *conf.MaxUserChat {
-			i18n.SendMsg(chatId, "chat_exceed", bot, nil, msgId)
-			return true
+func ExecuteForceReply(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Error("ExecuteForceReply panic err", "err", err, "stack", string(debug.Stack()))
 		}
-		times++
-	}
-	userChatMap.Store(userId, times)
-	return false
-}
+	}()
 
-func DecreaseUserChat(update tgbotapi.Update) {
-	_, _, userId := utils.GetChatIdAndMsgIdAndUserID(update)
-	if timeInter, ok := userChatMap.Load(userId); ok {
-		times := timeInter.(int)
-		times--
-		userChatMap.Store(userId, times)
+	switch update.Message.ReplyToMessage.Text {
+	case i18n.GetMessage(*conf.Lang, "chat_empty_content", nil):
+		sendChatMessage(update, bot)
+	case i18n.GetMessage(*conf.Lang, "photo_empty_content", nil):
+		sendImg(update, bot)
+	case i18n.GetMessage(*conf.Lang, "video_empty_content", nil):
+		sendVideo(update, bot)
 	}
 }

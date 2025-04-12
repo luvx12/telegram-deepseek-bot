@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
+	godeepseek "github.com/cohesion-org/deepseek-go"
 	"io"
 	"net/http"
 	"net/url"
@@ -25,36 +25,49 @@ import (
 	"github.com/yincongcyincong/telegram-deepseek-bot/utils"
 )
 
-type ImgResponse struct {
-	Code    int              `json:"code"`
-	Data    *ImgResponseData `json:"data"`
-	Message string           `json:"message"`
-	Status  string           `json:"status"`
+type HuoshanReq struct {
+	MessageChan chan *param.MsgInfo
+	Update      tgbotapi.Update
+	Bot         *tgbotapi.BotAPI
+	Content     string
+	Model       string
+	ToolsData   godeepseek.ToolCall
 }
 
-type ImgResponseData struct {
-	AlgorithmBaseResp struct {
-		StatusCode    int    `json:"status_code"`
-		StatusMessage string `json:"status_message"`
-	} `json:"algorithm_base_resp"`
-	ImageUrls        []string `json:"image_urls"`
-	PeResult         string   `json:"pe_result"`
-	PredictTagResult string   `json:"predict_tag_result"`
-	RephraserResult  string   `json:"rephraser_result"`
-}
+func (h *HuoshanReq) GetContent() {
+	// check user chat exceed max count
+	if utils.CheckUserChatExceed(h.Update, h.Bot) {
+		return
+	}
 
-func GetContentFromHS(messageChan chan *param.MsgInfo, update tgbotapi.Update, bot *tgbotapi.BotAPI, content string) {
-	text := strings.ReplaceAll(content, "@"+bot.Self.UserName, "")
-	err := getContentFromHS(text, update, messageChan)
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Error("GetContent panic err", "err", err)
+		}
+		utils.DecreaseUserChat(h.Update)
+		close(h.MessageChan)
+	}()
+
+	if h.Content == "" && h.Update.Message.Voice != nil && *conf.AudioAppID != "" {
+		audioContent := utils.GetAudioContent(h.Update, h.Bot)
+		if audioContent == nil {
+			logger.Warn("audio url empty")
+			return
+		}
+		h.Content = FileRecognize(audioContent)
+	}
+
+	text := strings.ReplaceAll(h.Content, "@"+h.Bot.Self.UserName, "")
+	err := h.getContentFromHS(text)
 	if err != nil {
 		logger.Error("Error calling DeepSeek API", "err", err)
 	}
-	close(messageChan)
+
 }
 
-func getContentFromHS(prompt string, update tgbotapi.Update, messageChan chan *param.MsgInfo) error {
+func (h *HuoshanReq) getContentFromHS(prompt string) error {
 	start := time.Now()
-	_, updateMsgID, userId := utils.GetChatIdAndMsgIdAndUserID(update)
+	_, updateMsgID, userId := utils.GetChatIdAndMsgIdAndUserID(h.Update)
 
 	messages := make([]*model.ChatCompletionMessage, 0)
 
@@ -117,6 +130,14 @@ func getContentFromHS(prompt string, update tgbotapi.Update, messageChan chan *p
 		StreamOptions: &model.StreamOptions{
 			IncludeUsage: true,
 		},
+		MaxTokens:        *conf.MaxTokens,
+		TopP:             float32(*conf.TopP),
+		FrequencyPenalty: float32(*conf.FrequencyPenalty),
+		TopLogProbs:      *conf.TopLogProbs,
+		LogProbs:         *conf.LogProbs,
+		Stop:             conf.Stop,
+		PresencePenalty:  float32(*conf.PresencePenalty),
+		Temperature:      float32(*conf.Temperature),
 	}
 
 	logger.Info("msg receive", "userID", userId, "prompt", prompt)
@@ -144,7 +165,7 @@ func getContentFromHS(prompt string, update tgbotapi.Update, messageChan chan *p
 		for _, choice := range response.Choices {
 			// exceed max telegram one message length
 			if utils.Utf16len(msgInfoContent.Content) > OneMsgLen {
-				messageChan <- msgInfoContent
+				h.MessageChan <- msgInfoContent
 				msgInfoContent = &param.MsgInfo{
 					SendLen:     NonFirstSendLen,
 					FullContent: msgInfoContent.FullContent,
@@ -155,7 +176,7 @@ func getContentFromHS(prompt string, update tgbotapi.Update, messageChan chan *p
 			msgInfoContent.Content += choice.Delta.Content
 			msgInfoContent.FullContent += choice.Delta.Content
 			if len(msgInfoContent.Content) > msgInfoContent.SendLen {
-				messageChan <- msgInfoContent
+				h.MessageChan <- msgInfoContent
 				msgInfoContent.SendLen += NonFirstSendLen
 			}
 		}
@@ -167,7 +188,7 @@ func getContentFromHS(prompt string, update tgbotapi.Update, messageChan chan *p
 
 	}
 
-	messageChan <- msgInfoContent
+	h.MessageChan <- msgInfoContent
 
 	// record time costing in dialog
 	totalDuration := time.Since(start).Seconds()
@@ -176,7 +197,7 @@ func getContentFromHS(prompt string, update tgbotapi.Update, messageChan chan *p
 }
 
 // GenerateImg generate image
-func GenerateImg(prompt string) (*ImgResponse, error) {
+func GenerateImg(prompt string) (*param.ImgResponse, error) {
 	start := time.Now()
 	visual.DefaultInstance.Client.SetAccessKey(*conf.VolcAK)
 	visual.DefaultInstance.Client.SetSecretKey(*conf.VolcSK)
@@ -211,7 +232,7 @@ func GenerateImg(prompt string) (*ImgResponse, error) {
 	}
 
 	respByte, _ := json.Marshal(resp)
-	data := &ImgResponse{}
+	data := &param.ImgResponse{}
 	json.Unmarshal(respByte, data)
 
 	// generate image time costing
@@ -245,7 +266,7 @@ func GenerateVideo(prompt string) (string, error) {
 	}
 
 	client := arkruntime.NewClientWithApiKey(
-		*conf.DeepseekToken,
+		*conf.VideoToken,
 		arkruntime.WithTimeout(30*time.Minute),
 		arkruntime.WithHTTPClient(httpClient),
 	)
@@ -296,5 +317,27 @@ func GenerateVideo(prompt string) (string, error) {
 			return "", errors.New("create video fail")
 		}
 	}
+
+}
+
+func FileRecognize(audioContent []byte) string {
+
+	client := utils.BuildAsrClient()
+	client.Appid = *conf.AudioAppID
+	client.Token = *conf.AudioToken
+	client.Cluster = *conf.AudioCluster
+
+	asrResponse, err := client.RequestAsr(audioContent)
+	if err != nil {
+		logger.Error("fail to request asr ", "err", err)
+		return ""
+	}
+
+	if len(asrResponse.Results) == 0 {
+		logger.Error("fail to request asr", "results", asrResponse.Results)
+		return ""
+	}
+
+	return asrResponse.Results[0].Text
 
 }

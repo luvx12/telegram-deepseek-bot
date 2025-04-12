@@ -2,7 +2,6 @@ package conf
 
 import (
 	"flag"
-	"github.com/yincongcyincong/telegram-deepseek-bot/logger"
 	"net/http"
 	"net/url"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/yincongcyincong/telegram-deepseek-bot/logger"
 )
 
 var (
@@ -27,6 +27,7 @@ var (
 	TokenPerUser  *int
 	NeedATBOt     *bool
 	MaxUserChat   *int
+	VideoToken    *string
 
 	AllowedTelegramUserIds  = make(map[int64]bool)
 	AllowedTelegramGroupIds = make(map[int64]bool)
@@ -50,15 +51,19 @@ func InitConf() {
 	TelegramProxy = flag.String("telegram_proxy", "", "db conf")
 	Lang = flag.String("lang", "en", "lang")
 	TokenPerUser = flag.Int("token_per_user", 10000, "token per user")
-	NeedATBOt = flag.Bool("need_atbot", false, "need atbot")
+	NeedATBOt = flag.Bool("need_at_bot", false, "need at bot")
 	MaxUserChat = flag.Int("max_user_chat", 2, "max chat per user")
+	VideoToken = flag.String("video_token", "", "video token")
 
 	adminUserIds := flag.String("admin_user_ids", "", "admin user ids")
 	allowedUserIds := flag.String("allowed_telegram_user_ids", "", "allowed telegram user ids")
 	allowedGroupIds := flag.String("allowed_telegram_group_ids", "", "allowed telegram group ids")
 
+	InitDeepseekConf()
 	InitPhotoConf()
 	InitVideoConf()
+	InitAudioConf()
+	InitToolsConf()
 	flag.Parse()
 
 	if os.Getenv("TELEGRAM_BOT_TOKEN") != "" {
@@ -129,6 +134,10 @@ func InitConf() {
 		*MaxUserChat, _ = strconv.Atoi(os.Getenv("MAX_USER_CHAT"))
 	}
 
+	if os.Getenv("VIDEO_TOKEN") != "" {
+		*VideoToken = os.Getenv("VIDEO_TOKEN")
+	}
+
 	for _, userIdStr := range strings.Split(*allowedUserIds, ",") {
 		userId, err := strconv.Atoi(userIdStr)
 		if err != nil {
@@ -156,23 +165,24 @@ func InitConf() {
 		AdminUserIds[int64(userId)] = true
 	}
 
-	logger.Info("", "TelegramBotToken", *BotToken)
-	logger.Info("", "DeepseekToken", *DeepseekToken)
-	logger.Info("", "CustomUrl", *CustomUrl)
-	logger.Info("", "DeepseekType", *DeepseekType)
-	logger.Info("", "VolcAK", *VolcAK)
-	logger.Info("", "VolcSK", *VolcSK)
-	logger.Info("", "DBType", *DBType)
-	logger.Info("", "DBConf", *DBConf)
-	logger.Info("", "AllowedTelegramUserIds", *allowedUserIds)
-	logger.Info("", "AllowedTelegramGroupIds", *allowedGroupIds)
-	logger.Info("", "DeepseekProxy", *DeepseekProxy)
-	logger.Info("", "TelegramProxy", *TelegramProxy)
-	logger.Info("", "Lang", *Lang)
-	logger.Info("", "TokenPerUser", *TokenPerUser)
-	logger.Info("", "AdminUserIds", *adminUserIds)
-	logger.Info("", "NeedATBOt", *NeedATBOt)
-	logger.Info("", "MaxUserChat", *MaxUserChat)
+	logger.Info("CONF", "TelegramBotToken", *BotToken)
+	logger.Info("CONF", "DeepseekToken", *DeepseekToken)
+	logger.Info("CONF", "CustomUrl", *CustomUrl)
+	logger.Info("CONF", "DeepseekType", *DeepseekType)
+	logger.Info("CONF", "VolcAK", *VolcAK)
+	logger.Info("CONF", "VolcSK", *VolcSK)
+	logger.Info("CONF", "DBType", *DBType)
+	logger.Info("CONF", "DBConf", *DBConf)
+	logger.Info("CONF", "AllowedTelegramUserIds", *allowedUserIds)
+	logger.Info("CONF", "AllowedTelegramGroupIds", *allowedGroupIds)
+	logger.Info("CONF", "DeepseekProxy", *DeepseekProxy)
+	logger.Info("CONF", "TelegramProxy", *TelegramProxy)
+	logger.Info("CONF", "Lang", *Lang)
+	logger.Info("CONF", "TokenPerUser", *TokenPerUser)
+	logger.Info("CONF", "AdminUserIds", *adminUserIds)
+	logger.Info("CONF", "NeedATBOt", *NeedATBOt)
+	logger.Info("CONF", "MaxUserChat", *MaxUserChat)
+	logger.Info("CONF", "VideoToken", *VideoToken)
 
 	if *BotToken == "" || *DeepseekToken == "" {
 		panic("Bot token and deepseek token are required")
@@ -231,6 +241,18 @@ func CreateBot() *tgbotapi.BotAPI {
 		tgbotapi.BotCommand{
 			Command:     "state",
 			Description: "calculate one user token usage.",
+		},
+		tgbotapi.BotCommand{
+			Command:     "photo",
+			Description: "using volcengine photo model create photo.",
+		},
+		tgbotapi.BotCommand{
+			Command:     "video",
+			Description: "using volcengine video model create video.",
+		},
+		tgbotapi.BotCommand{
+			Command:     "chat",
+			Description: "allows the bot to chat through /chat command in groups, without the bot being set as admin of the group.",
 		},
 	)
 	Bot.Send(cmdCfg)
